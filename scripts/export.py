@@ -4,6 +4,7 @@
 #     "kokoro==0.8.4",
 #     "onnx==1.17.0",
 #     "onnxruntime==1.20.1",
+#     "onnxscript>=0.6.0",
 #     "sounddevice==0.5.1",
 # ]
 #
@@ -28,6 +29,30 @@ import sounddevice as sd
 import torch
 from kokoro import KModel, KPipeline
 from kokoro.model import KModelForONNX
+
+
+def _force_plbert_eager_attention_for_onnx(kmodel: KModel) -> None:
+    """
+    Newer Transformers uses SDPA + masking helpers that break under ``torch.jit.trace``
+    (legacy ``torch.onnx.export``). PL-BERT is ``CustomAlbert`` → ``AlbertModel``.
+    """
+    bert = getattr(kmodel, "bert", None)
+    if bert is None:
+        return
+    cfg = getattr(bert, "config", None)
+    if cfg is not None:
+        for name in ("attn_implementation", "_attn_implementation", "_attn_implementation_internal"):
+            if hasattr(cfg, name):
+                try:
+                    setattr(cfg, name, "eager")
+                except (AttributeError, TypeError):
+                    pass
+    setter = getattr(bert, "set_attn_implementation", None)
+    if callable(setter):
+        try:
+            setter("eager")
+        except Exception:
+            pass
 
 
 def export_onnx(model, output):
@@ -181,6 +206,7 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
 
     kmodel = KModel(config=config_file, model=checkpoint_path, disable_complex=True)
+    _force_plbert_eager_attention_for_onnx(kmodel)
     model = KModelForONNX(kmodel).eval()
 
     if args.inference:

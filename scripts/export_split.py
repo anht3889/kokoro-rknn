@@ -4,6 +4,7 @@
 #     "kokoro==0.8.4",
 #     "onnx==1.17.0",
 #     "onnxruntime==1.20.1",
+#     "onnxscript>=0.6.0",
 # ]
 # ///
 
@@ -26,6 +27,30 @@ import onnx
 import torch
 import torch.nn as nn
 from kokoro import KModel
+
+
+def _force_plbert_eager_attention_for_onnx(kmodel: KModel) -> None:
+    """
+    Newer Transformers uses SDPA + masking helpers that break under ``torch.jit.trace``
+    (legacy ``torch.onnx.export``). PL-BERT is ``CustomAlbert`` → ``AlbertModel``.
+    """
+    bert = getattr(kmodel, "bert", None)
+    if bert is None:
+        return
+    cfg = getattr(bert, "config", None)
+    if cfg is not None:
+        for name in ("attn_implementation", "_attn_implementation", "_attn_implementation_internal"):
+            if hasattr(cfg, name):
+                try:
+                    setattr(cfg, name, "eager")
+                except (AttributeError, TypeError):
+                    pass
+    setter = getattr(bert, "set_attn_implementation", None)
+    if callable(setter):
+        try:
+            setter("eager")
+        except Exception:
+            pass
 
 
 class KokoroEncoderONNX(nn.Module):
@@ -192,5 +217,6 @@ if __name__ == "__main__":
         model=args.checkpoint_path,
         disable_complex=True,
     ).eval()
+    _force_plbert_eager_attention_for_onnx(kmodel)
     export_encoder(KokoroEncoderONNX(kmodel), args.output_dir)
     export_decoder(KokoroDecoderONNX(kmodel), args.output_dir, kmodel)
