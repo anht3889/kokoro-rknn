@@ -16,11 +16,18 @@ memory limits, or dynamic-shape issues). Run ``scripts/convert_rknn.py`` on
 each ONNX, or run the decoder with ONNX Runtime / PyTorch on CPU only.
 
 Pipeline on device: encoder RKNN -> decoder (RKNN or CPU).
+
+**ONNX exporter:** Current Transformers builds run Albert/PL-BERT through masking
+helpers that break ``torch.jit.trace`` (legacy ONNX). By default this script uses
+``torch.onnx.export(..., dynamo=True)``, which requires ``onnxscript`` (see PEP 723
+dependencies). Use ``--legacy-onnx-trace`` only with an older Transformers (e.g. 4.4x)
+where tracing still works.
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 
 import onnx
@@ -51,6 +58,31 @@ def _force_plbert_eager_attention_for_onnx(kmodel: KModel) -> None:
             setter("eager")
         except Exception:
             pass
+
+
+def _torch_onnx_export(*, legacy_trace: bool, **kwargs) -> None:
+    sig = inspect.signature(torch.onnx.export)
+    has_dynamo_kw = "dynamo" in sig.parameters
+
+    def _trace_export() -> None:
+        if has_dynamo_kw:
+            torch.onnx.export(**kwargs, dynamo=False)
+        else:
+            torch.onnx.export(**kwargs)
+
+    if legacy_trace or not has_dynamo_kw:
+        _trace_export()
+        return
+
+    dynamo_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
+    try:
+        torch.onnx.export(**dynamo_kwargs, dynamo=True)
+    except Exception as e:
+        raise RuntimeError(
+            "torch.onnx.export(dynamo=True) failed. Recent Transformers + PL-BERT do not work "
+            "with the legacy traced ONNX exporter. Install onnxscript (pip install onnxscript). "
+            "To force tracing anyway, use --legacy-onnx-trace with an older transformers (e.g. 4.4x)."
+        ) from e
 
 
 class KokoroEncoderONNX(nn.Module):
@@ -128,15 +160,16 @@ class KokoroDecoderONNX(nn.Module):
         return self.decoder(asr, f0_pred, n_pred, style).squeeze()
 
 
-def export_encoder(model: KokoroEncoderONNX, out_dir: str) -> str:
+def export_encoder(model: KokoroEncoderONNX, out_dir: str, *, legacy_trace: bool) -> str:
     path = os.path.join(out_dir, "kokoro_encoder.onnx")
     input_ids = torch.randint(1, 100, (48,)).numpy()
     input_ids = torch.LongTensor([[0, *input_ids, 0]])
     style = torch.randn(1, 256)
     speed = torch.tensor([1], dtype=torch.int32).reshape(1)
 
-    torch.onnx.export(
-        model,
+    _torch_onnx_export(
+        legacy_trace=legacy_trace,
+        model=model,
         args=(input_ids, style, speed),
         f=path,
         export_params=True,
@@ -156,7 +189,7 @@ def export_encoder(model: KokoroEncoderONNX, out_dir: str) -> str:
     return path
 
 
-def export_decoder(model: KokoroDecoderONNX, out_dir: str, km: KModel) -> str:
+def export_decoder(model: KokoroDecoderONNX, out_dir: str, km: KModel, *, legacy_trace: bool) -> str:
     path = os.path.join(out_dir, "kokoro_decoder.onnx")
     # Shapes from a short dummy forward through encoder (same device as km)
     dev = next(km.parameters()).device
@@ -168,8 +201,9 @@ def export_decoder(model: KokoroDecoderONNX, out_dir: str, km: KModel) -> str:
         asr, f0, n, _ = enc(input_ids, ref_s, speed)
     style = ref_s[:, :128]
 
-    torch.onnx.export(
-        model,
+    _torch_onnx_export(
+        legacy_trace=legacy_trace,
+        model=model,
         args=(asr, f0, n, style),
         f=path,
         export_params=True,
@@ -209,6 +243,11 @@ if __name__ == "__main__":
         type=str,
         default="onnx_split",
     )
+    parser.add_argument(
+        "--legacy-onnx-trace",
+        action="store_true",
+        help="Use legacy torch.jit-traced ONNX export (fails on current Transformers + PL-BERT).",
+    )
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -217,6 +256,14 @@ if __name__ == "__main__":
         model=args.checkpoint_path,
         disable_complex=True,
     ).eval()
-    _force_plbert_eager_attention_for_onnx(kmodel)
-    export_encoder(KokoroEncoderONNX(kmodel), args.output_dir)
-    export_decoder(KokoroDecoderONNX(kmodel), args.output_dir, kmodel)
+    if args.legacy_onnx_trace:
+        _force_plbert_eager_attention_for_onnx(kmodel)
+    export_encoder(
+        KokoroEncoderONNX(kmodel), args.output_dir, legacy_trace=args.legacy_onnx_trace
+    )
+    export_decoder(
+        KokoroDecoderONNX(kmodel),
+        args.output_dir,
+        kmodel,
+        legacy_trace=args.legacy_onnx_trace,
+    )

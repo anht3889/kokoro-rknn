@@ -18,9 +18,14 @@ wget https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/config.json 
 wget https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/kokoro-v1_1-zh.pth -O checkpoints/kokoro-v1_1-zh.pth
 uv run examples/export.py
 uv run examples/export.py --config_file checkpoints/config.json --checkpoint_path checkpoints/kokoro-v1_1-zh.pth
+
+Default ONNX export uses ``torch.onnx.export(..., dynamo=True)`` (needs onnxscript) because
+current Transformers + PL-BERT breaks the legacy traced exporter. Use ``--legacy-onnx-trace``
+only with older transformers (e.g. 4.4x).
 """
 
 import argparse
+import inspect
 import os
 
 import onnx
@@ -55,7 +60,32 @@ def _force_plbert_eager_attention_for_onnx(kmodel: KModel) -> None:
             pass
 
 
-def export_onnx(model, output):
+def _torch_onnx_export(*, legacy_trace: bool, **kwargs):
+    sig = inspect.signature(torch.onnx.export)
+    has_dynamo_kw = "dynamo" in sig.parameters
+
+    def _trace_export() -> None:
+        if has_dynamo_kw:
+            torch.onnx.export(**kwargs, dynamo=False)
+        else:
+            torch.onnx.export(**kwargs)
+
+    if legacy_trace or not has_dynamo_kw:
+        _trace_export()
+        return
+
+    dynamo_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
+    try:
+        torch.onnx.export(**dynamo_kwargs, dynamo=True)
+    except Exception as e:
+        raise RuntimeError(
+            "torch.onnx.export(dynamo=True) failed. Recent Transformers + PL-BERT do not work "
+            "with the legacy traced ONNX exporter. Install onnxscript (pip install onnxscript). "
+            "To force tracing anyway, use --legacy-onnx-trace with an older transformers (e.g. 4.4x)."
+        ) from e
+
+
+def export_onnx(model, output, *, legacy_trace: bool):
     onnx_file = output + "/" + "kokoro.onnx"
 
     input_ids = torch.randint(1, 100, (48,)).numpy()
@@ -63,8 +93,9 @@ def export_onnx(model, output):
     style = torch.randn(1, 256)
     speed = torch.randint(1, 10, (1,)).int()
 
-    torch.onnx.export(
-        model,
+    _torch_onnx_export(
+        legacy_trace=legacy_trace,
+        model=model,
         args=(input_ids, style, speed),
         f=onnx_file,
         export_params=True,
@@ -194,6 +225,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir", "-o", type=str, default="onnx", help="output directory"
     )
+    parser.add_argument(
+        "--legacy-onnx-trace",
+        action="store_true",
+        help="Use legacy torch.jit-traced ONNX export (fails on current Transformers + PL-BERT).",
+    )
 
     args = parser.parse_args()
 
@@ -206,7 +242,8 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
 
     kmodel = KModel(config=config_file, model=checkpoint_path, disable_complex=True)
-    _force_plbert_eager_attention_for_onnx(kmodel)
+    if args.legacy_onnx_trace:
+        _force_plbert_eager_attention_for_onnx(kmodel)
     model = KModelForONNX(kmodel).eval()
 
     if args.inference:
@@ -214,4 +251,4 @@ if __name__ == "__main__":
     elif args.check:
         check_model(model)
     else:
-        export_onnx(model, output_dir)
+        export_onnx(model, output_dir, legacy_trace=args.legacy_onnx_trace)
