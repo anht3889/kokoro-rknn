@@ -8,7 +8,6 @@ wheels/
 
 # General
 *.pt
-*.onnx
 .DS_Store
 *.wav
 *.json

@@ -23,7 +23,9 @@ Notes
 - Many ``load_onnx`` builds need both ``input_size_list`` **and** input names
   (``inputs=[...]``) when fixing dynamic axes.
 - If ``onnx`` is installed, symbolic dimensions are detected and defaults are
-  applied (3 inputs → ``--seq-len 256``, 4 inputs → ``--decoder-preset``).
+  applied (3 net inputs → ``--seq-len 256``, 4 → ``--decoder-preset``). Net inputs
+  omit ``graph.input`` names that only exist as ``graph.initializer`` (common in
+  ONNX exports), so the input count matches the real forward inputs.
 - INT8 quantization needs a calibration dataset path for ``rknn.build``.
 - **rknn-toolkit2 2.3.x + Kokoro:** ``build`` may fail in ``fold_constant`` with
   ``'list' object has no attribute 'dtype'``. Pass ``--cpu-fallback-kokoro`` to put
@@ -115,13 +117,21 @@ def _apply_rknn_config(
 
 
 def _onnx_input_meta(onnx_path: str) -> tuple[bool, list[str]]:
-    """Return (has_symbolic_dim, input_names_in_order)."""
+    """Return (has_symbolic_dim, net input names in order).
+
+    ONNX ``graph.input`` often includes entries that are only parameter slots
+    backed by ``graph.initializer``. Counting those breaks Kokoro's 3-input
+    heuristic and skips auto ``--seq-len``.
+    """
     import onnx
 
     model = onnx.load(onnx_path)
+    initializer_names = {init.name for init in model.graph.initializer}
     names: list[str] = []
     symbolic = False
     for inp in model.graph.input:
+        if inp.name in initializer_names:
+            continue
         names.append(inp.name)
         shape = inp.type.tensor_type.shape
         for dim in shape.dim:
