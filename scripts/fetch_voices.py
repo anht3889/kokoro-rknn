@@ -25,16 +25,16 @@ import torch
 from tqdm import tqdm
 
 config = {
-    "Kokoro-82M-v1.1-zh": {
-        "voice_url": "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/voices/{name}.pt",
-        "api_url": "https://huggingface.co/api/models/hexgrad/Kokoro-82M-v1.1-zh/tree/main/voices",
-        "npz_path": "voices-v1.1-zh.bin",
-    },
-    # "Kokoro-82M": {
-    #     "voice_url": "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices/{name}.pt",
-    #     "api_url": "https://huggingface.co/api/models/hexgrad/Kokoro-82M/tree/main/voices",
-    #     "npz_path": "voices-v1.0.bin",
+    # "Kokoro-82M-v1.1-zh": {
+    #    "voice_url": "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/voices/{name}.pt",
+    #   "api_url": "https://huggingface.co/api/models/hexgrad/Kokoro-82M-v1.1-zh/tree/main/voices",
+    #    "npz_path": "voices-v1.1-zh.bin",
     # },
+    "Kokoro-82M": {
+        "voice_url": "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices/{name}.pt",
+        "api_url": "https://huggingface.co/api/models/hexgrad/Kokoro-82M/tree/main/voices",
+        "npz_path": "voices-v1.0.bin",
+    },
 }
 # Extract voice names
 
