@@ -4,7 +4,7 @@
 #     "kokoro==0.8.4",
 #     "onnx==1.17.0",
 #     "onnxruntime==1.20.1",
-#     "onnxscript>=0.6.0",
+#     "transformers>=4.43.0,<4.48.0",
 #     "sounddevice==0.5.1",
 # ]
 #
@@ -19,14 +19,15 @@ wget https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/kokoro-v1_1-
 uv run examples/export.py
 uv run examples/export.py --config_file checkpoints/config.json --checkpoint_path checkpoints/kokoro-v1_1-zh.pth
 
-Default ONNX export uses ``torch.onnx.export(..., dynamo=True)`` (needs onnxscript) because
-current Transformers + PL-BERT breaks the legacy traced exporter. Use ``--legacy-onnx-trace``
-only with older transformers (e.g. 4.4x).
+**ONNX export:** Default is traced ``torch.onnx.export`` (needs **transformers < 4.48**).
+Use ``uv run`` so the PEP 723 pin applies, or ``pip install 'transformers>=4.43,<4.48'``.
+Optional ``--dynamo-onnx`` is experimental (needs onnxscript; often fails).
 """
 
 import argparse
 import inspect
 import os
+import re
 
 import onnx
 import onnxruntime as ort
@@ -34,6 +35,32 @@ import sounddevice as sd
 import torch
 from kokoro import KModel, KPipeline
 from kokoro.model import KModelForONNX
+
+_MAX_TRANSFORMERS_FOR_TRACE = (4, 48, 0)
+
+
+def _transformers_version_tuple() -> tuple[int, int, int]:
+    import transformers
+
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", transformers.__version__.strip())
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    m = re.match(r"^(\d+)\.(\d+)", transformers.__version__.strip())
+    if m:
+        return int(m.group(1)), int(m.group(2)), 0
+    return 0, 0, 0
+
+
+def _require_transformers_for_traced_onnx() -> None:
+    tv = _transformers_version_tuple()
+    if tv >= _MAX_TRANSFORMERS_FOR_TRACE:
+        raise SystemExit(
+            f"transformers {'.'.join(map(str, tv))} is too new for traced ONNX export "
+            f"(need < {_MAX_TRANSFORMERS_FOR_TRACE[0]}.{_MAX_TRANSFORMERS_FOR_TRACE[1]}). "
+            "Run: pip install 'transformers>=4.43,<4.48'\n"
+            "Or use: uv run scripts/export.py\n"
+            "Experimental alternative: --dynamo-onnx (requires onnxscript; often fails)."
+        )
 
 
 def _force_plbert_eager_attention_for_onnx(kmodel: KModel) -> None:
@@ -79,9 +106,9 @@ def _torch_onnx_export(*, legacy_trace: bool, **kwargs):
         torch.onnx.export(**dynamo_kwargs, dynamo=True)
     except Exception as e:
         raise RuntimeError(
-            "torch.onnx.export(dynamo=True) failed. Recent Transformers + PL-BERT do not work "
-            "with the legacy traced ONNX exporter. Install onnxscript (pip install onnxscript). "
-            "To force tracing anyway, use --legacy-onnx-trace with an older transformers (e.g. 4.4x)."
+            "torch.onnx.export(dynamo=True) failed (expected for many Kokoro + Transformers versions). "
+            "Install onnxscript if missing: pip install onnxscript\n"
+            "For a reliable path, omit --dynamo-onnx and use transformers>=4.43,<4.48 with traced export."
         ) from e
 
 
@@ -226,9 +253,9 @@ if __name__ == "__main__":
         "--output_dir", "-o", type=str, default="onnx", help="output directory"
     )
     parser.add_argument(
-        "--legacy-onnx-trace",
+        "--dynamo-onnx",
         action="store_true",
-        help="Use legacy torch.jit-traced ONNX export (fails on current Transformers + PL-BERT).",
+        help="Experimental: torch.onnx.export(dynamo=True); needs onnxscript, often fails on Transformers.",
     )
 
     args = parser.parse_args()
@@ -241,8 +268,9 @@ if __name__ == "__main__":
     # make dir
     os.makedirs(output_dir, exist_ok=True)
 
+    legacy_trace = not args.dynamo_onnx
     kmodel = KModel(config=config_file, model=checkpoint_path, disable_complex=True)
-    if args.legacy_onnx_trace:
+    if legacy_trace:
         _force_plbert_eager_attention_for_onnx(kmodel)
     model = KModelForONNX(kmodel).eval()
 
@@ -251,4 +279,6 @@ if __name__ == "__main__":
     elif args.check:
         check_model(model)
     else:
-        export_onnx(model, output_dir, legacy_trace=args.legacy_onnx_trace)
+        if legacy_trace:
+            _require_transformers_for_traced_onnx()
+        export_onnx(model, output_dir, legacy_trace=legacy_trace)

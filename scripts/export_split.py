@@ -4,7 +4,7 @@
 #     "kokoro==0.8.4",
 #     "onnx==1.17.0",
 #     "onnxruntime==1.20.1",
-#     "onnxscript>=0.6.0",
+#     "transformers>=4.43.0,<4.48.0",
 # ]
 # ///
 
@@ -17,11 +17,15 @@ each ONNX, or run the decoder with ONNX Runtime / PyTorch on CPU only.
 
 Pipeline on device: encoder RKNN -> decoder (RKNN or CPU).
 
-**ONNX exporter:** Current Transformers builds run Albert/PL-BERT through masking
-helpers that break ``torch.jit.trace`` (legacy ONNX). By default this script uses
-``torch.onnx.export(..., dynamo=True)``, which requires ``onnxscript`` (see PEP 723
-dependencies). Use ``--legacy-onnx-trace`` only with an older Transformers (e.g. 4.4x)
-where tracing still works.
+**ONNX export:** Default is **traced** ``torch.onnx.export`` (``dynamo=False``). That
+requires **transformers < 4.48** — newer releases change Albert/PL-BERT masking in
+ways that break tracing, and **Dynamo** export hits unsupported introspection inside
+Transformers decorators. This script's PEP 723 block pins ``transformers`` accordingly
+when you use ``uv run``. With a plain ``python`` venv, run
+``pip install 'transformers>=4.43,<4.48'`` or use ``uv run``.
+
+Optional ``--dynamo-onnx`` tries ``dynamo=True`` (install ``onnxscript``); it often
+still fails on Kokoro + current library stacks.
 """
 
 from __future__ import annotations
@@ -29,11 +33,39 @@ from __future__ import annotations
 import argparse
 import inspect
 import os
+import re
 
 import onnx
 import torch
 import torch.nn as nn
 from kokoro import KModel
+
+# Traced ONNX breaks on Albert when transformers uses the newer flex/SDPA mask path.
+_MAX_TRANSFORMERS_FOR_TRACE = (4, 48, 0)
+
+
+def _transformers_version_tuple() -> tuple[int, int, int]:
+    import transformers
+
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", transformers.__version__.strip())
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    m = re.match(r"^(\d+)\.(\d+)", transformers.__version__.strip())
+    if m:
+        return int(m.group(1)), int(m.group(2)), 0
+    return 0, 0, 0
+
+
+def _require_transformers_for_traced_onnx() -> None:
+    tv = _transformers_version_tuple()
+    if tv >= _MAX_TRANSFORMERS_FOR_TRACE:
+        raise SystemExit(
+            f"transformers {'.'.join(map(str, tv))} is too new for traced ONNX export "
+            f"(need < {_MAX_TRANSFORMERS_FOR_TRACE[0]}.{_MAX_TRANSFORMERS_FOR_TRACE[1]}). "
+            "Run: pip install 'transformers>=4.43,<4.48'\n"
+            "Or use: uv run scripts/export_split.py\n"
+            "Experimental alternative: --dynamo-onnx (requires onnxscript; often fails)."
+        )
 
 
 def _force_plbert_eager_attention_for_onnx(kmodel: KModel) -> None:
@@ -79,9 +111,9 @@ def _torch_onnx_export(*, legacy_trace: bool, **kwargs) -> None:
         torch.onnx.export(**dynamo_kwargs, dynamo=True)
     except Exception as e:
         raise RuntimeError(
-            "torch.onnx.export(dynamo=True) failed. Recent Transformers + PL-BERT do not work "
-            "with the legacy traced ONNX exporter. Install onnxscript (pip install onnxscript). "
-            "To force tracing anyway, use --legacy-onnx-trace with an older transformers (e.g. 4.4x)."
+            "torch.onnx.export(dynamo=True) failed (expected for many Kokoro + Transformers versions). "
+            "Install onnxscript if missing: pip install onnxscript\n"
+            "For a reliable path, omit --dynamo-onnx and use transformers>=4.43,<4.48 with traced export."
         ) from e
 
 
@@ -244,26 +276,30 @@ if __name__ == "__main__":
         default="onnx_split",
     )
     parser.add_argument(
-        "--legacy-onnx-trace",
+        "--dynamo-onnx",
         action="store_true",
-        help="Use legacy torch.jit-traced ONNX export (fails on current Transformers + PL-BERT).",
+        help="Experimental: torch.onnx.export(dynamo=True); needs onnxscript, often fails on Transformers.",
     )
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+
+    legacy_trace = not args.dynamo_onnx
+    if legacy_trace:
+        _require_transformers_for_traced_onnx()
 
     kmodel = KModel(
         config=args.config_file,
         model=args.checkpoint_path,
         disable_complex=True,
     ).eval()
-    if args.legacy_onnx_trace:
+    if legacy_trace:
         _force_plbert_eager_attention_for_onnx(kmodel)
     export_encoder(
-        KokoroEncoderONNX(kmodel), args.output_dir, legacy_trace=args.legacy_onnx_trace
+        KokoroEncoderONNX(kmodel), args.output_dir, legacy_trace=legacy_trace
     )
     export_decoder(
         KokoroDecoderONNX(kmodel),
         args.output_dir,
         kmodel,
-        legacy_trace=args.legacy_onnx_trace,
+        legacy_trace=legacy_trace,
     )
