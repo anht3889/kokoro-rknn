@@ -25,6 +25,11 @@ Notes
 - If ``onnx`` is installed, symbolic dimensions are detected and defaults are
   applied (3 inputs → ``--seq-len 256``, 4 inputs → ``--decoder-preset``).
 - INT8 quantization needs a calibration dataset path for ``rknn.build``.
+- **rknn-toolkit2 2.3.x + Kokoro:** ``build`` may fail in ``fold_constant`` with
+  ``'list' object has no attribute 'dtype'``. Pass ``--cpu-fallback-kokoro`` to put
+  known-problem ONNX nodes on CPU (see rockchip-linux/rknn-toolkit2#359). Re-export
+  ONNX with ``do_constant_folding=False`` (default in this repo's export scripts)
+  if issues persist.
 """
 
 from __future__ import annotations
@@ -38,11 +43,54 @@ from typing import Any, Optional
 KOKORO_3_INPUTS = ["input_ids", "style", "speed"]
 KOKORO_4_INPUTS = ["asr", "f0", "n", "style"]
 
+# Ops commonly present in Kokoro ONNX that RKNN maps poorly; offload to CPU via op_target.
+# See https://github.com/rockchip-linux/rknn-toolkit2/issues/359 (fold_constant / list dtype).
+KOKORO_CPU_FALLBACK_OP_TYPES = frozenset(
+    {
+        "And",
+        "Atan",
+        "ConcatFromSequence",
+        "CumSum",
+        "Expand",
+        "Floor",
+        "Loop",
+        "Not",
+        "RandomNormalLike",
+        "RandomUniformLike",
+        "Range",
+        "Reciprocal",
+        "ReduceProd",
+        "Round",
+        "ScatterElements",
+        "SequenceEmpty",
+        "SplitToSequence",
+        "TopK",
+    }
+)
 
-def _apply_rknn_config(rknn, platform: str, *, dynamic_input: bool) -> None:
+
+def _op_target_cpu_for_onnx_ops(onnx_path: str, op_types: frozenset) -> dict[str, str]:
+    import onnx
+
+    model = onnx.load(onnx_path)
+    target: dict[str, str] = {}
+    for node in model.graph.node:
+        if not node.name or node.op_type not in op_types:
+            continue
+        target[node.name] = "cpu"
+    return target
+
+
+def _apply_rknn_config(
+    rknn,
+    platform: str,
+    *,
+    dynamic_input: bool,
+    op_target: Optional[dict[str, str]] = None,
+) -> None:
     """Call rknn.config; dynamic flag uses Rockchip's ``dyanmic_input`` typo when present."""
     params = inspect.signature(rknn.config).parameters
-    kwargs: dict = {"target_platform": platform}
+    kwargs: dict[str, Any] = {"target_platform": platform}
     if dynamic_input:
         if "dyanmic_input" in params:
             kwargs["dyanmic_input"] = True
@@ -53,6 +101,14 @@ def _apply_rknn_config(rknn, platform: str, *, dynamic_input: bool) -> None:
                 "Warning: --dynamic-input was set but rknn.config has no "
                 "dynamic_input / dyanmic_input parameter; use --seq-len or "
                 "--input-size-list for fixed shapes.",
+                file=sys.stderr,
+            )
+    if op_target:
+        if "op_target" in params:
+            kwargs["op_target"] = op_target
+        else:
+            print(
+                "Warning: rknn.config has no op_target; CPU fallback was not applied.",
                 file=sys.stderr,
             )
     rknn.config(**kwargs)
@@ -267,6 +323,14 @@ def main() -> int:
         action="store_true",
         help="Set dynamic_input / dyanmic_input in rknn.config when supported.",
     )
+    parser.add_argument(
+        "--cpu-fallback-kokoro",
+        action="store_true",
+        help=(
+            "Map many Kokoro ONNX ops to CPU via rknn.config(op_target=...) "
+            "(workaround for fold_constant / list dtype on toolkit 2.3.x)."
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -297,8 +361,28 @@ def main() -> int:
         )
         return 1
 
+    op_target: Optional[dict[str, str]] = None
+    if args.cpu_fallback_kokoro:
+        try:
+            op_target = _op_target_cpu_for_onnx_ops(
+                args.onnx, KOKORO_CPU_FALLBACK_OP_TYPES
+            )
+            print(
+                f"CPU fallback: routing {len(op_target)} ONNX node(s) to CPU "
+                f"(op_target).",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"Could not build op_target from ONNX: {e}", file=sys.stderr)
+            return 1
+
     rknn = RKNN(verbose=args.verbose)
-    _apply_rknn_config(rknn, args.platform, dynamic_input=args.dynamic_input)
+    _apply_rknn_config(
+        rknn,
+        args.platform,
+        dynamic_input=args.dynamic_input,
+        op_target=op_target,
+    )
 
     load_kwargs: dict[str, Any] = {"model": args.onnx}
     if input_size_list is not None:
@@ -348,10 +432,24 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    ret = rknn.build(
-        do_quantization=args.quantize,
-        dataset=args.dataset or None,
-    )
+    try:
+        ret = rknn.build(
+            do_quantization=args.quantize,
+            dataset=args.dataset or None,
+        )
+    except ValueError as e:
+        msg = str(e).lower()
+        if "dtype" in msg or "fold_constant" in msg:
+            print(
+                "\nRKNN build hit a known Kokoro + toolkit 2.3.x issue. Try:\n"
+                "  --cpu-fallback-kokoro\n"
+                "Re-export ONNX with do_constant_folding=False (see scripts/export_split.py).\n",
+                file=sys.stderr,
+            )
+        print(f"build failed: {e}", file=sys.stderr)
+        rknn.release()
+        return 1
+
     if ret != 0:
         print(f"build failed, return code {ret}", file=sys.stderr)
         rknn.release()

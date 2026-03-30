@@ -214,7 +214,8 @@ def export_encoder(model: KokoroEncoderONNX, out_dir: str, *, legacy_trace: bool
             "f0": {1: "mel_frames"},
             "n": {1: "mel_frames"},
         },
-        do_constant_folding=True,
+        # RKNN toolkit 2.3.x can crash in fold_constant on folded Kokoro graphs.
+        do_constant_folding=False,
     )
     onnx.checker.check_model(onnx.load(path))
     print(f"export {path} ok")
@@ -248,7 +249,7 @@ def export_decoder(model: KokoroDecoderONNX, out_dir: str, km: KModel, *, legacy
             "n": {1: "mel_frames"},
             "waveform": {0: "num_samples"},
         },
-        do_constant_folding=True,
+        do_constant_folding=False,
     )
     onnx.checker.check_model(onnx.load(path))
     print(f"export {path} ok")

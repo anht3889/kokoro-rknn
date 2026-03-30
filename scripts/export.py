@@ -134,7 +134,7 @@ def export_onnx(model, output, *, legacy_trace: bool):
             "input_ids": {1: "input_ids_len"},
             "waveform": {0: "num_samples"},
         },
-        do_constant_folding=True,
+        do_constant_folding=False,  # RKNN 2.3.x fold_constant issues on Kokoro
     )
 
     print("export kokoro.onnx ok!")
