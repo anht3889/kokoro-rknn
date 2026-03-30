@@ -54,7 +54,7 @@ def download_config():
     resp.raise_for_status()
     content = resp.content
     with open(
-        Path(__file__).parent / "../src/kokoro_onnx/config.json", "wb", encoding="utf-8"
+        Path(__file__).parent / "../src/kokoro_onnx/config.json", "wb"
     ) as fp:
         fp.write(content)
 
