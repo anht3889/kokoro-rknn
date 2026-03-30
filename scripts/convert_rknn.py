@@ -28,10 +28,11 @@ Notes
   ONNX exports), so the input count matches the real forward inputs.
 - INT8 quantization needs a calibration dataset path for ``rknn.build``.
 - **rknn-toolkit2 2.3.x + Kokoro:** ``build`` may fail in ``fold_constant`` with
-  ``'list' object has no attribute 'dtype'``. Pass ``--cpu-fallback-kokoro`` to put
-  known-problem ONNX nodes on CPU (see rockchip-linux/rknn-toolkit2#359). Re-export
-  ONNX with ``do_constant_folding=False`` (default in this repo's export scripts)
-  if issues persist.
+  ``'list' object has no attribute 'dtype'``. By default this script maps
+  known-problem ONNX ops to CPU via ``op_target`` (see rockchip-linux/rknn-toolkit2#359);
+  pass ``--no-cpu-fallback-kokoro`` to skip that. Re-export ONNX with
+  ``do_constant_folding=False`` (default in this repo's export scripts) if issues
+  persist.
 """
 
 from __future__ import annotations
@@ -264,6 +265,15 @@ def _require_shapes_or_dynamic(args: argparse.Namespace) -> Optional[int]:
     return None
 
 
+def _is_fold_constant_kokoro_build_err(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return (
+        "dtype" in msg
+        or "fold_constant" in msg
+        or ("list" in msg and "attribute" in msg)
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Convert Kokoro ONNX to .rknn (RKNN-Toolkit2)",
@@ -335,12 +345,20 @@ def main() -> int:
     )
     parser.add_argument(
         "--cpu-fallback-kokoro",
+        dest="cpu_fallback_kokoro",
         action="store_true",
         help=(
             "Map many Kokoro ONNX ops to CPU via rknn.config(op_target=...) "
-            "(workaround for fold_constant / list dtype on toolkit 2.3.x)."
+            "(default: on; RKNN 2.3.x fold_constant workaround)."
         ),
     )
+    parser.add_argument(
+        "--no-cpu-fallback-kokoro",
+        dest="cpu_fallback_kokoro",
+        action="store_false",
+        help="Disable Kokoro op_target CPU routing (not recommended on toolkit 2.3.x).",
+    )
+    parser.set_defaults(cpu_fallback_kokoro=True)
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -447,15 +465,21 @@ def main() -> int:
             do_quantization=args.quantize,
             dataset=args.dataset or None,
         )
-    except ValueError as e:
-        msg = str(e).lower()
-        if "dtype" in msg or "fold_constant" in msg:
-            print(
-                "\nRKNN build hit a known Kokoro + toolkit 2.3.x issue. Try:\n"
-                "  --cpu-fallback-kokoro\n"
-                "Re-export ONNX with do_constant_folding=False (see scripts/export_split.py).\n",
-                file=sys.stderr,
-            )
+    except Exception as e:
+        if _is_fold_constant_kokoro_build_err(e):
+            if not args.cpu_fallback_kokoro:
+                print(
+                    "\nRKNN build hit a known Kokoro + toolkit 2.3.x issue. Retry without "
+                    "--no-cpu-fallback-kokoro (CPU op_target is on by default), or re-export "
+                    "ONNX with do_constant_folding=False (see scripts/export_split.py).\n",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "\nRKNN build still failed after Kokoro CPU op_target. Try re-exporting "
+                    "ONNX with do_constant_folding=False (scripts/export.py / export_split.py).\n",
+                    file=sys.stderr,
+                )
         print(f"build failed: {e}", file=sys.stderr)
         rknn.release()
         return 1
