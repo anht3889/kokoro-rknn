@@ -71,7 +71,7 @@ def main() -> int:
         default=None,
         help=(
             "Optional explicit input shapes as JSON list of lists, e.g. "
-            '\'[[1,128],[1,256],[1]]\' for [input_ids, style, speed]. '
+            "'[[1,128],[1,256],[1]]' for [input_ids, style, speed]. "
             "Omit to let the toolkit infer from ONNX (may fail for dynamic axes)."
         ),
     )

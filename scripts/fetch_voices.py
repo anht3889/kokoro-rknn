@@ -75,7 +75,7 @@ def download_voices(voice_url: str, names: list[str], npz_path: str):
         voices[name] = data
 
     # Save all voices to a single .npz file
-    with open(npz_path, "wb", encoding="utf-8") as f:
+    with open(npz_path, "wb") as f:
         np.savez(f, **voices)
 
         mb_size = os.path.getsize(npz_path) // 1000 // 1000
